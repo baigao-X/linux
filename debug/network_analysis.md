@@ -124,6 +124,156 @@ graph TD
 - `skc_net`: 网络命名空间
 - `skc_refcnt`: 引用计数
 
+
+1. 共享公共字段 (__sk_common - sock.h:359)
+struct sock_common __sk_common;
+包含所有套接字类型共享的字段:
+地址信息:
+skc_daddr / sk_daddr: 目的 IP 地址
+skc_rcv_saddr / sk_rcv_saddr: 本地接收地址
+skc_v6_daddr / sk_v6_daddr: IPv6 目的地址
+端口信息:
+skc_dport / sk_dport: 目的端口
+skc_num / sk_num: 本地端口号
+核心状态:
+skc_state / sk_state: 套接字状态 (如 TCP_ESTABLISHED)
+skc_family / sk_family: 地址族 (AF_INET/AF_INET6)
+skc_refcnt / sk_refcnt: 引用计数
+skc_hash / sk_hash: 哈希表查找键值
+协议与网络:
+skc_prot / sk_prot: 协议操作函数表指针
+skc_net / sk_net: 所属网络命名空间
+2. 接收路径 - 写端 (sock_write_rx - sock.h:394)
+atomic_t sk_drops;                    // 丢包统计
+__s32 sk_peek_off;                    // MSG_PEEK 偏移量
+struct sk_buff_head sk_error_queue;   // 错误队列
+struct sk_buff_head sk_receive_queue; // 接收队列
+struct {                               // 积压队列
+    atomic_t rmem_alloc;              // 接收缓冲区已分配内存
+    int len;                          // 队列长度
+    struct sk_buff *head;             // 队列头
+    struct sk_buff *tail;             // 队列尾
+} sk_backlog;
+作用: 管理接收数据包的缓冲和排队,sk_backlog 在持有套接字锁时用于缓存到达的数据包。
+3. 接收路径 - 读端 (sock_read_rx - sock.h:418)
+struct dst_entry __rcu *sk_rx_dst;    // 接收路由缓存(用于 early demux)
+int sk_rx_dst_ifindex;                // 接收接口索引
+u32 sk_rx_dst_cookie;                 // 路由缓存 cookie
+
+#ifdef CONFIG_NET_RX_BUSY_POLL
+unsigned int sk_ll_usec;              // 低延迟轮询微秒数
+unsigned int sk_napi_id;              // NAPI 上下文 ID
+u16 sk_busy_poll_budget;              // 繁忙轮询预算
+u8 sk_prefer_busy_poll;               // 优先使用繁忙轮询
+#endif
+
+int sk_rcvbuf;                        // 接收缓冲区大小
+struct sk_filter __rcu *sk_filter;    // BPF 过滤器
+struct socket_wq __rcu *sk_wq;        // 等待队列和异步通知
+
+void (*sk_data_ready)(struct sock *sk); // 数据就绪回调
+long sk_rcvtimeo;                     // 接收超时时间
+int sk_rcvlowat;                      // SO_RCVLOWAT 最小接收阈值
+作用: 用于快速接收路径决策和流量控制,支持繁忙轮询等低延迟特性。
+4. 读写共享 - 读端 (sock_read_rxtx - sock.h:446)
+int sk_err;                           // 最近的错误码
+struct socket *sk_socket;             // 指向 BSD 套接字层
+struct mem_cgroup *sk_memcg;          // 内存 cgroup
+struct xfrm_policy __rcu *sk_policy[2]; // IPsec 策略
+作用: 存储错误状态、套接字层关联和安全策略。
+5. 读写共享 - 写端 (sock_write_rxtx - sock.h:460)
+socket_lock_t sk_lock;                // 套接字锁
+u32 sk_reserved_mem;                  // 保留内存(不可回收)
+int sk_forward_alloc;                 // 预分配的内存空间
+u32 sk_tsflags;                       // SO_TIMESTAMPING 标志
+作用: 提供同步机制和内存管理。
+6. 发送路径 - 写端 (sock_write_tx - sock.h:467)
+int sk_write_pending;                 // 正在等待的写操作数
+atomic_t sk_omem_alloc;               // 选项/其他内存分配
+int sk_err_soft;                      // 软错误(不导致立即失败)
+int sk_wmem_queued;                   // 已排队的发送缓冲区字节数
+refcount_t sk_wmem_alloc;             // 发送缓冲区已提交字节数
+unsigned long sk_tsq_flags;           // TCP Small Queues 标志
+
+union {
+    struct sk_buff *sk_send_head;     // 待发送队列头
+    struct rb_root tcp_rtx_queue;     // TCP 重传队列(红黑树)
+};
+
+struct sk_buff_head sk_write_queue;   // 发送队列
+u32 sk_dst_pending_confirm;           // 邻居需要确认标志
+u32 sk_pacing_status;                 // 流量控制状态
+struct page_frag sk_frag;             // 页片段缓存
+struct timer_list sk_timer;           // 套接字定时器
+
+unsigned long sk_pacing_rate;         // 流量控制速率(字节/秒)
+atomic_t sk_zckey;                    // MSG_ZEROCOPY 通知计数器
+atomic_t sk_tskey;                    // 时间戳请求消歧计数器
+作用: 管理发送队列、流量控制、零拷贝和定时器。
+7. 发送路径 - 读端 (sock_read_tx - sock.h:490)
+unsigned long sk_max_pacing_rate;     // 最大流量控制速率
+long sk_sndtimeo;                     // 发送超时时间
+u32 sk_priority;                      // SO_PRIORITY 优先级
+u32 sk_mark;                          // 数据包标记
+kuid_t sk_uid;                        // 套接字拥有者 UID
+u16 sk_protocol;                      // 协议类型
+u16 sk_type;                          // 套接字类型(SOCK_STREAM 等)
+
+struct dst_entry __rcu *sk_dst_cache; // 目的路由缓存
+netdev_features_t sk_route_caps;      // 路由能力(如 TSO)
+
+struct sk_buff* (*sk_validate_xmit_skb)(...); // 发送验证函数
+
+u16 sk_gso_type;                      // GSO 类型
+u16 sk_gso_max_segs;                  // GSO 最大段数
+unsigned int sk_gso_max_size;         // GSO 最大段大小
+gfp_t sk_allocation;                  // 内存分配标志
+u32 sk_txhash;                        // 发送流哈希
+int sk_sndbuf;                        // 发送缓冲区大小
+u8 sk_pacing_shift;                   // TCP Small Queues 缩放因子
+bool sk_use_task_frag;                // 允许使用 task_frag
+作用: 发送参数配置、路由缓存、GSO/TSO 卸载控制。
+8. 其他重要成员 (sock.h:519)
+// 标志位
+u8 sk_gso_disabled : 1,               // 禁用 GSO
+   sk_kern_sock : 1,                  // 内核套接字
+   sk_no_check_tx : 1,                // 发送时不检查校验和
+   sk_no_check_rx : 1;                // 接收时允许零校验和
+
+u8 sk_shutdown;                       // 关闭状态掩码
+
+// 同步与回调
+rwlock_t sk_callback_lock;            // 回调函数锁
+void (*sk_state_change)(struct sock *sk);    // 状态变化回调
+void (*sk_write_space)(struct sock *sk);     // 发送缓冲区可用回调
+void (*sk_error_report)(struct sock *sk);    // 错误报告回调
+int (*sk_backlog_rcv)(struct sock *sk, ...); // 积压队列处理回调
+void (*sk_destruct)(struct sock *sk);        // 销毁回调
+
+// 监听相关
+u32 sk_ack_backlog;                   // 当前连接队列长度
+u32 sk_max_ack_backlog;               // listen() 设置的最大连接数
+
+// 其他
+unsigned long sk_lingertime;          // SO_LINGER 延迟时间
+struct proto *sk_prot_creator;        // 原始协议指针
+spinlock_t sk_peer_lock;              // 对端信息锁
+struct pid *sk_peer_pid;              // 对端进程 PID
+const struct cred *sk_peer_cred;      // SO_PEERCRED 对端凭证
+ktime_t sk_stamp;                     // 最后接收数据包的时间戳
+
+void *sk_user_data;                   // 用户层私有数据
+void *sk_security;                    // 安全模块数据
+
+// eBPF 相关
+u8 sk_bpf_cb_flags;                   // BPF 回调标志
+struct bpf_local_storage __rcu *sk_bpf_storage; // BPF 本地存储
+struct sock_reuseport __rcu *sk_reuseport_cb;   // reuseport 组
+
+struct rcu_head sk_rcu;               // RCU 回收
+netns_tracker ns_tracker;             // 网络命名空间跟踪
+struct xarray sk_user_frags;          // 用户片段数组
+
 #### `struct inet_sock` (INET Socket 扩展)
 
 **位置**: `include/net/inet_sock.h:212`
